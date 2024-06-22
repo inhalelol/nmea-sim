@@ -32,7 +32,7 @@ def calculate_new_position_ddmm(lat_start_ddmm, lon_start_ddmm, course, speed, m
     course_rad = math.radians(course)
     
     # Вычисляем расстояние, пройденное за данный интервал времени
-    distance = speed * 1  # в метрах
+    distance = speed * 0.1  # в метрах
     
     # Радиус Земли в метрах
     R = 6371000  
@@ -109,15 +109,19 @@ def new_coords_with_gear(gear, lat_start_ddmm, lon_start_ddmm, course, speed):
         course = add_cyclic(course, 180, max_value=359)
     return lat_new_ddmm, lon_new_ddmm, course
 
-UDP_IP = "127.0.0.1"
+UDP_IP = "192.168.1.28"
 UDP_PORT = 5005
 
-host = "192.168.1.17"
+host = "192.168.1.21"
 port = 25565
 
 print("UDP target IP: %s" % UDP_IP)
 print("UDP target port: %s" % UDP_PORT)
-serv_sock = udp_server_init()
+try:
+    serv_sock = udp_server_init(host, port)
+except OSError as e:
+    serv_sock = None
+    print(f"Error: {e}")
 
 sock = socket.socket(socket.AF_INET, # Internet
                      socket.SOCK_DGRAM) # UDP
@@ -131,51 +135,53 @@ lon_start_ddmm = 3716.1331  # долгота начальной точки (Мо
 speed = 0  # скорость в м/с
 
 while True:
-    rudder_angle, speed, gear = udp_rec(serv_sock)
-    # 0 - neutral
-    # 1 - drive
-    # 2 - reverse
-    if gear != 0:
-        speed = speed * 0.6 # 60 kph max
-        speed = speed * 0.277778 # to m/s
-    else:
-        speed = 0
-        
-    utc_now = datetime.now(timezone.utc)
-    formatted_date = utc_now.strftime('%d%m%y')
-    formatted_time = utc_now.strftime('%H%M%S')
-    current_time = time.time()
-
-    if current_time - last_time >= 1:
-        if gear != 2:
-            course = add_cyclic(course, rudder_angle, max_value=359)
+    if serv_sock is not None:
+        rudder_angle, speed, gear = udp_rec(serv_sock)
+        # 0 - neutral
+        # 1 - drive
+        # 2 - reverse
+        if gear != 0:
+            speed = speed * 0.6 # 60 kph max
+            speed = speed * 0.277778 # to m/s
         else:
-            course = add_cyclic(course, -rudder_angle, max_value=359)
-        print(course)
-        
-        MESSAGE_HDT = f"$GPHDT,{course},T"
-        checksum_hdt = calculate_nmea_checksum(bytearray(MESSAGE_HDT.encode('ascii')))
-        MESSAGE_HDT = f"{MESSAGE_HDT}*{checksum_hdt}"
-        MESSAGE_HDT = MESSAGE_HDT.encode('ascii')
-        sock.sendto(MESSAGE_HDT, (UDP_IP, UDP_PORT))
-        
-            #heading = add_cyclic(course, 180, max_value=359)
-        #lat_new_ddmm, lon_new_ddmm = calculate_new_position_ddmm(lat_start_ddmm, lon_start_ddmm, course, speed)
-        lat_new_ddmm, lon_new_ddmm, heading = new_coords_with_gear(gear, lat_start_ddmm, lon_start_ddmm, course, speed)
-        speed = speed * 1.94384
+            speed = 0
+            
+        utc_now = datetime.now(timezone.utc)
+        formatted_date = utc_now.strftime('%d%m%y')
+        formatted_time = utc_now.strftime('%H%M%S')
+        current_time = time.time()
+    
+        if current_time - last_time >= 0.1:
+            if gear != 2:
+                course = add_cyclic(course, rudder_angle/10, max_value=359)
+            else:
+                course = add_cyclic(course, -rudder_angle/10, max_value=359)
+            print(course)
+            
+            MESSAGE_HDT = f"$GPHDT,{course},T"
+            checksum_hdt = calculate_nmea_checksum(bytearray(MESSAGE_HDT.encode('ascii')))
+            MESSAGE_HDT = f"{MESSAGE_HDT}*{checksum_hdt}"
+            MESSAGE_HDT = MESSAGE_HDT.encode('ascii')
+            sock.sendto(MESSAGE_HDT, (UDP_IP, UDP_PORT))
+            
+                #heading = add_cyclic(course, 180, max_value=359)
+            #lat_new_ddmm, lon_new_ddmm = calculate_new_position_ddmm(lat_start_ddmm, lon_start_ddmm, course, speed)
+            lat_new_ddmm, lon_new_ddmm, heading = new_coords_with_gear(gear, lat_start_ddmm, lon_start_ddmm, course, speed)
+            speed = speed * 1.94384
+    
+            #MESSAGE = f"$GPRMC,{formatted_time},A,4454.5453,N,03716.1331,E,5.5,{course}.0,{formatted_date},,,"
+            MESSAGE = f"$GPRMC,{formatted_time},A,{lat_new_ddmm},N,{lon_new_ddmm},E,{speed},{heading},{formatted_date},,,"
+            checksum = calculate_nmea_checksum(bytearray(MESSAGE.encode('ascii')))
+            MESSAGE = f"{MESSAGE}*{checksum}"
+            MESSAGE = MESSAGE.encode('ascii')
+            #print(MESSAGE)
+            sock.sendto(MESSAGE, (UDP_IP, UDP_PORT))
+            
+            #sock.sendto(f'{MESSAGE}{MESSAGE_HDT}', (UDP_IP, UDP_PORT))
+    
+            lat_start_ddmm = lat_new_ddmm
+            lon_start_ddmm = lon_new_ddmm
+    
+            last_time = current_time
 
-        #MESSAGE = f"$GPRMC,{formatted_time},A,4454.5453,N,03716.1331,E,5.5,{course}.0,{formatted_date},,,"
-        MESSAGE = f"$GPRMC,{formatted_time},A,{lat_new_ddmm},N,{lon_new_ddmm},E,{speed},{heading},{formatted_date},,,"
-        checksum = calculate_nmea_checksum(bytearray(MESSAGE.encode('ascii')))
-        MESSAGE = f"{MESSAGE}*{checksum}"
-        MESSAGE = MESSAGE.encode('ascii')
-        #print(MESSAGE)
-        sock.sendto(MESSAGE, (UDP_IP, UDP_PORT))
-        
-        #sock.sendto(f'{MESSAGE}{MESSAGE_HDT}', (UDP_IP, UDP_PORT))
-
-        lat_start_ddmm = lat_new_ddmm
-        lon_start_ddmm = lon_new_ddmm
-
-        last_time = current_time
-
+input("Нажмите Enter для выхода...")
