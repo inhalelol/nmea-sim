@@ -49,8 +49,12 @@ class UdpServer:
         print(f'Server listening on {host}:{port}')
 
     def rec_data(self) -> bytes:
-        data, address = self.sock.recvfrom(100)  # 4096 - максимальный размер буфера
-        print(f'Received {len(data)} bytes from {address}')
+        try:
+            data, address = self.sock.recvfrom(100)  # 4096 - максимальный размер буфера
+            print(f'Received {len(data)} bytes from {address}')
+        except ConnectionResetError as e:
+            data = None
+            print(f"Error: {e}")
         return data
 
     def send_bytes(self, data: bytes, ip: str = '127.0.0.1', port: int = 25565):
@@ -116,10 +120,7 @@ class MoveCalc:
         self.RMC = NmeaRMC()
 
     def udp_data_parse(self, data: bytes):
-        # data, address = sock.recvfrom(100)  # 4096 - максимальный размер буфера
-        # print(f'Received {len(data)} bytes from {address}')
         self.rudder_angle = struct.unpack('b', data[0:1])[0]  # 'b' для 8-битного целого числа со знаком
-        # print(f'Received angle: {angle}')
         speed = struct.unpack('b', data[1:2])[0]  # 'b' для 8-битного целого числа со знаком
         self.gear = struct.unpack('b', data[2:3])[0]  # 'b' для 8-битного целого числа со знаком
         # 0 - neutral
@@ -133,7 +134,7 @@ class MoveCalc:
         print(f'Received angle: {self.rudder_angle}, Received speed: {self.speed}, Received gear: {self.gear}')
         #return angle, speed, gear
 
-    def calculate_new_position_ddmm(self):
+    def calculate_new_position_ddmm(self, moving_forward=True):
         # Конвертируем широту и долготу из формата DDMM.MM в градусы
         lat_deg = int(self.lat_start_ddmm // 100) + (self.lat_start_ddmm % 100) / 60
         lon_deg = int(self.lon_start_ddmm // 100) + (self.lon_start_ddmm % 100) / 60
@@ -142,8 +143,14 @@ class MoveCalc:
         lat_rad = math.radians(lat_deg)
         lon_rad = math.radians(lon_deg)
 
+        # Изменяем курс на противоположный, если движемся назад
+        if not moving_forward:
+            course = (self.course + 180) % 360
+        else:
+            course = self.course
+
         # Переводим курс в радианы
-        course_rad = math.radians(self.course)
+        course_rad = math.radians(course)
 
         # Вычисляем расстояние, пройденное за данный интервал времени
         distance = self.speed * 0.1  # в метрах
@@ -172,10 +179,11 @@ class MoveCalc:
     def new_coords_with_gear(self):
         if self.gear != 2:
             lat_new_ddmm, lon_new_ddmm = self.calculate_new_position_ddmm()
+            heading = self.course
         else:
-            lat_new_ddmm, lon_new_ddmm = self.calculate_new_position_ddmm()
-            self.course = add_cyclic(self.course, 180, max_value=359)
-        return lat_new_ddmm, lon_new_ddmm, self.course
+            lat_new_ddmm, lon_new_ddmm = self.calculate_new_position_ddmm(moving_forward=False)
+            heading = add_cyclic(self.course, 180, max_value=359)
+        return lat_new_ddmm, lon_new_ddmm, heading
 
     def calc_new_data(self, ftime: str, fdate: str) -> bytes:
         if self.gear != 2:
@@ -186,41 +194,32 @@ class MoveCalc:
         MESSAGE_HDT = self.HDT.upd_data([self.course])
         lat_new_ddmm, lon_new_ddmm, heading = self.new_coords_with_gear()
         self.speed = self.speed * 1.94384
-        MESSAGE_RMC = self.RMC.upd_data([ftime, lat_new_ddmm, lon_new_ddmm, heading, self.speed, fdate])
+        MESSAGE_RMC = self.RMC.upd_data([ftime, lat_new_ddmm, lon_new_ddmm, self.speed, heading, fdate])
         self.lat_start_ddmm = lat_new_ddmm
         self.lon_start_ddmm = lon_new_ddmm
         return MESSAGE_HDT + MESSAGE_RMC
 
 
 if __name__ == "__main__":
+
     host = "127.0.0.1"
     port = 25565
     server = UdpServer(host, port)
 
     UDP_IP = "127.0.0.1"
-    UDP_PORT = 25567
+    UDP_PORT = 5005
 
     print("UDP target IP: %s" % UDP_IP)
     print("UDP target port: %s" % UDP_PORT)
 
-    #sock = socket.socket(socket.AF_INET,  # Internet
-    #                     socket.SOCK_DGRAM)  # UDP
-
-    #course = 0
     last_time = time.time()
-
-    #lat_start_ddmm = 4454.5453  # широта начальной точки (Москва в формате DDMM.MM)
-    #lon_start_ddmm = 3716.1331  # долгота начальной точки (Москва в формате DDMM.MM)
-    # course = 45  # курс в градусах (на северо-восток)
-    #speed = 0  # скорость в м/с
-
     mover = MoveCalc()
 
     while True:
         if server.sock is not None:
             data = server.rec_data()
-            mover.udp_data_parse(data)
-
+            if data is not None:
+                mover.udp_data_parse(data)
 
             utc_now = datetime.now(timezone.utc)
             formatted_date = utc_now.strftime('%d%m%y')
@@ -229,33 +228,6 @@ if __name__ == "__main__":
 
             if current_time - last_time >= 0.1:
                 MESSAGE = mover.calc_new_data(formatted_time, formatted_date)
-
-                '''
-                MESSAGE_HDT = f"$GPHDT,{course},T"
-                checksum_hdt = calculate_nmea_checksum(bytearray(MESSAGE_HDT.encode('ascii')))
-                MESSAGE_HDT = f"{MESSAGE_HDT}*{checksum_hdt}"
-                MESSAGE_HDT = MESSAGE_HDT.encode('ascii')
-                '''
-                # sock.sendto(MESSAGE_HDT, (UDP_IP, UDP_PORT))
-                #server.send_bytes(MESSAGE_HDT, UDP_IP, UDP_PORT)
-
-                # heading = add_cyclic(course, 180, max_value=359)
-                # lat_new_ddmm, lon_new_ddmm = calculate_new_position_ddmm(lat_start_ddmm, lon_start_ddmm, course, speed)
-
-
-                # MESSAGE = f"$GPRMC,{formatted_time},A,4454.5453,N,03716.1331,E,5.5,{course}.0,{formatted_date},,,"
-                '''
-                MESSAGE = f"$GPRMC,{formatted_time},A,{lat_new_ddmm},N,{lon_new_ddmm},E,{speed},{heading},{formatted_date},,,"
-                checksum = calculate_nmea_checksum(bytearray(MESSAGE.encode('ascii')))
-                MESSAGE = f"{MESSAGE}*{checksum}"
-                MESSAGE = MESSAGE.encode('ascii')
-                '''
-                # print(MESSAGE)
-                #sock.sendto(MESSAGE, (UDP_IP, UDP_PORT))
-                #server.send_bytes(MESSAGE, UDP_IP, UDP_PORT)
-
-                # sock.sendto(f'{MESSAGE}{MESSAGE_HDT}', (UDP_IP, UDP_PORT))
-
                 server.send_bytes(MESSAGE, UDP_IP, UDP_PORT)
                 last_time = current_time
 
